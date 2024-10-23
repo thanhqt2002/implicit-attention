@@ -1,4 +1,5 @@
 ## Code for RPC-SymViT and Scaled Attention in Our Paper
+Unveiling the Hidden Structure of Self-Attention via Kernel Principal Component Analysis
 https://arxiv.org/abs/2406.13762
 
 ## Requirements
