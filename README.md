@@ -1,4 +1,5 @@
 ## Code for RPC-SymViT and Scaled Attention in Our Paper
+https://arxiv.org/abs/2406.13762
 
 ## Requirements
 This toolkit requires PyTorch `torch`. 

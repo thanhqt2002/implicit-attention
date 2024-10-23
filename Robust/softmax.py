@@ -12,12 +12,13 @@ import torch.nn.functional as F
  
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from timm.models.vision_transformer import init_weights_vit_timm, init_weights_vit_jax, _load_weights
-# from timm.models.vision_transformer import _init_vit_weights, _load_weights
 from timm.models.helpers import build_model_with_cfg, named_apply, adapt_input_conv
 from utils import named_apply
 import copy
 import wandb
 
+
+ 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., 
                  robust=False, layerth=0, n=1, lambd=0, layer=0):
@@ -26,15 +27,11 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.n = n
-        # self.mu = lambd
         self.lambd = lambd
         self.layer = layer
         # sqrt (D)
         self.scale = head_dim ** -0.5
         self.layerth = layerth
-        # if self.layerth == layer:
-        #     self.bias = nn.Parameter(torch.tensor(0.3))
-            # self.shrinkscale = 0.3
 
         self.qkv = nn.Linear(dim, dim * 2, bias=qkv_bias)
         
@@ -50,100 +47,61 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-        if self.robust and self.layerth < self.layer:
-            # l = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-            # y = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-            # k_d = k.detach()
-            # wandb.log({f"k": k.mean()})
-
-            mu=N*(C // self.num_heads)/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
-            # sp = torch.nn.Softplus(beta=1.0, threshold=1.0)
-            # shrink = self.lambd/mu.mean()
-            # ss = torch.nn.Softshrink(lambd=shrink.item())
-            # ss = torch.nn.Tanhshrink()
-
-            for i in range(0,self.n-1):
-                # s = (k-l+y/(mu+1e-8))
-                s = k 
-                s_less = s.le(-self.lambd/(mu+1e-8)).int()
-                s_more = s.ge(self.lambd/(mu+1e-8)).int()
-                s = (s-self.lambd/(mu+1e-8))*s_more + (s+self.lambd/(mu+1e-8))*s_less
-                # s = ss(s)
-                # k2 = k-s-y/(mu+1e-8)
-                # k2 = k-y/mu
-                # x1, x2, x3, x4 = s.size()
-                # wandb.log({f"sparsity of s {i}": torch.count_nonzero(s)/((x1*x2*x3*x4))})
-                # wandb.log({f"k {i}": k2.mean()})
-                l = (k2 @ k2.transpose(-2, -1)) * self.scale
-                l = l.softmax(dim=-1)
-                l = l @ v
-                # y = y+mu*(k-l-s)
-            
-            # s = (k-l+y/(mu+1e-8))
-            s = k
-            s_less = s.le(-self.lambd/(mu+1e-8)).int()
-            s_more = s.ge(self.lambd/(mu+1e-8)).int()
-            s = (s-self.lambd/(mu+1e-8))*s_more + (s+self.lambd/(mu+1e-8))*s_less
-            # s = ss(s)
-            # x1, x2, x3, x4 = s.size()
-            # wandb.log({f"sparsity of s {i+1}": torch.count_nonzero(s)/(x1*x2*x3*x4)})
-            # wandb.log({f"k {i+1}": k2.mean()})
-            # s = relu(s-self.lambd*mu) - relu(-s-self.lambd*mu)
-            # s = sp(s-self.lambd/(mu+1e-8)) - sp(-s-self.lambd/(mu+1e-8))
-            k2 = k-s
-            # -y/(mu+1e-8)
-            # k2 = k-y/mu
-            l = (k2 @ k2.transpose(-2, -1)) * self.scale
-            l = l.softmax(dim=-1)
-            l = self.attn_drop(l)
-            x = l @ v
-        
-        elif self.robust and self.layerth==self.layer:
+        if self.robust and self.layer < 0:
             l = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
             y = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-            # k_d = k.detach()
-            # wandb.log({f"k": k.mean()})
 
-            mu=N*(C // self.num_heads)/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
-            # sp = torch.nn.Softplus(beta=1.0, threshold=1.0)
-            # shrink = self.lambd/mu.mean()
-            # ss = torch.nn.Softshrink(lambd=shrink.item())
-            # ss = torch.nn.Tanhshrink()
-            # relu = torch.nn.LeakyReLU()
+            mu=N*C/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
 
             for i in range(0,self.n-1):
-                s = (k-l+y/(mu+1e-8)) * 0.5
-                # s_less = s.le(-self.lambd/(mu+1e-8)).int()
-                # s_more = s.ge(self.lambd/(mu+1e-8)).int()
-                # s = (s-self.lambd/(mu+1e-8))*s_more + (s+self.lambd/(mu+1e-8))*s_less
-                # s = ss(s)
-                k2 = k-s-y/(mu+1e-8)
-                # k2 = k-y/mu
-                # x1, x2, x3, x4 = s.size()
-                # wandb.log({f"sparsity of s {i}": torch.count_nonzero(s)/((x1*x2*x3*x4))})
-                # wandb.log({f"k {i}": k2.mean()})
+                s = k-l+y/mu
+                s_less = s.le(-self.lambd*mu).int()
+                s_more = s.ge(self.lambd*mu).int()
+                s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
+                k2 = k-s-y/mu
                 l = (k2 @ k2.transpose(-2, -1)) * self.scale
                 l = l.softmax(dim=-1)
                 l = l @ v
                 y = y+mu*(k-l-s)
             
-            s = (k-l+y/(mu+1e-8))
-            s_less = s.le(-self.lambd/(mu+1e-8)).int()
-            s_more = s.ge(self.lambd/(mu+1e-8)).int()
-            s = (s-self.lambd/(mu+1e-8))*s_more + (s+self.lambd/(mu+1e-8))*s_less
-            # s = ss(s)
-            # x1, x2, x3, x4 = s.size()
-            # wandb.log({f"sparsity of s {i+1}": torch.count_nonzero(s)/(x1*x2*x3*x4)})
-            # wandb.log({f"k {i+1}": k2.mean()})
-            # s = relu(s-self.lambd*mu) - relu(-s-self.lambd*mu)
-            # s = sp(s-self.lambd/(mu+1e-8)) - sp(-s-self.lambd/(mu+1e-8))
-            k2 = k-s-y/(mu+1e-8)
-            # k2 = k-y/mu
+            s = k-l+y/mu
+            s_less = s.le(-self.lambd*mu).int()
+            s_more = s.ge(self.lambd*mu).int()
+            s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
+            k2 = k-s-y/mu
             l = (k2 @ k2.transpose(-2, -1)) * self.scale
             l = l.softmax(dim=-1)
             l = self.attn_drop(l)
             x = l @ v
-            # y = y+mu*(k-x-s)
+            y = y+mu*(k-x-s)
+        
+        elif self.robust and self.layerth==self.layer:
+            l = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
+            y = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
+
+            mu=N*C/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
+
+            for i in range(0,self.n-1):
+                s = k-l+y/mu
+                s_less = s.le(-self.lambd*mu).int()
+                s_more = s.ge(self.lambd*mu).int()
+                s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
+                k2 = k-s-y/mu
+                l = (k2 @ k2.transpose(-2, -1)) * self.scale
+                l = l.softmax(dim=-1)
+                l = l @ v
+                y = y+mu*(k-l-s)
+            
+            s = k-l+y/mu
+            s_less = s.le(-self.lambd*mu).int()
+            s_more = s.ge(self.lambd*mu).int()
+            s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
+            k2 = k-s-y/mu
+            l = (k2 @ k2.transpose(-2, -1)) * self.scale
+            l = l.softmax(dim=-1)
+            l = self.attn_drop(l)
+            x = l @ v
+            y = y+mu*(k-x-s)
 
         else:
             attn = (k @ k.transpose(-2, -1)) * self.scale
@@ -288,23 +246,6 @@ class VisionTransformer(nn.Module):
         else:
             trunc_normal_(self.cls_token, std=.02)
             init_weights_vit_timm
-    
-    # def init_weights(self, mode=''):
-    #     assert mode in ('jax', 'jax_nlhb', 'nlhb', '')
-    #     head_bias = -math.log(self.num_classes) if 'nlhb' in mode else 0.
-    #     trunc_normal_(self.pos_embed, std=.02)
-    #     if self.dist_token is not None:
-    #         trunc_normal_(self.dist_token, std=.02)
-    #     if mode.startswith('jax'):
-    #         # leave cls token as zeros to match jax impl
-    #         named_apply(partial(_init_vit_weights, head_bias=head_bias, jax_impl=True), self)
-    #     else:
-    #         trunc_normal_(self.cls_token, std=.02)
-    #         self.apply(_init_vit_weights)
- 
-    # def _init_weights(self, m):
-    #     # this fn left here for compat with downstream users
-    #     _init_vit_weights(m)
  
     def _init_weights(self, m):
         # this fn left here for compat with downstream users
@@ -360,6 +301,3 @@ class VisionTransformer(nn.Module):
             x = self.head(x)
         return x
  
-
-
-
