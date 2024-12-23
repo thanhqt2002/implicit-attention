@@ -36,5 +36,7 @@
 ehthumbs.db
 Thumbs.db
 
-_pycache_
+*/__pycache__/
 wandb/
+data/
+output/

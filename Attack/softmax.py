@@ -11,137 +11,101 @@ import torch.nn as nn
 import torch.nn.functional as F
  
 from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
-from timm.models.vision_transformer import init_weights_vit_timm, init_weights_vit_jax, _load_weights
+from timm.models.vision_transformer import init_weights_vit_timm, _load_weights, init_weights_vit_jax
 from timm.models.helpers import build_model_with_cfg, named_apply, adapt_input_conv
 from utils import named_apply
 import copy
-import wandb
 
 
  
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., 
-                 robust=False, layerth=0, n=1, lambd=0, layer=0):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., layerth=0, ttl_tokens=0,s_scalar=False):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
+        self.ttl_tokens = ttl_tokens
+        self.layerth = layerth
+        self.s_scalar = s_scalar
         head_dim = dim // num_heads
-        self.n = n
-        self.lambd = lambd
-        self.layer = layer
+        self.head_dim = head_dim
         # sqrt (D)
         self.scale = head_dim ** -0.5
-        self.layerth = layerth
 
-        self.qkv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        if self.layerth != 0 or True:
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        else:
+            self.A = nn.Parameter(torch.zeros(num_heads, head_dim * 4, head_dim * 4))  # Matrix Multp
+            self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
+            nn.init.xavier_uniform_(self.A)
+            self.fixed_point_iter = 5
+
+        # if self.s_scalar:
+        #     self.s = nn.Parameter(torch.zeros(1))
+        # else:
+        #     self.s = nn.Parameter(torch.zeros(self.num_heads, self.ttl_tokens, self.ttl_tokens))
         
         self.attn_drop = nn.Dropout(attn_drop)
 
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-        self.robust = robust
+
+        
 
     def forward(self, x):
         B, N, C = x.shape
-        # q,k -> B -> heads -> n -> features
-        qkv = self.qkv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-        if self.robust and self.layer < 0:
-            l = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-            y = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
+        # I = torch.eye(N,N).unsqueeze(dim=0).unsqueeze(dim=0).expand(B,self.num_heads,N,N).to(torch.device("cuda"), non_blocking=True)
+        # if self.s_scalar:
+        #     sym_attn = (k @ k.transpose(-2, -1)) * self.scale
+        #     sym_attn = sym_attn.softmax(dim=-1)
+        #     v = (I-sym_attn * self.s) @ v
+        # else:
+        #     s = self.s.unsqueeze(dim=0).expand(B,self.num_heads,N,N)
+        #     v = (I-s) @ v
 
-            mu=N*C/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
+        if self.layerth != 0 or True:
+            # q,k -> B -> heads -> n -> features
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-            for i in range(0,self.n-1):
-                s = k-l+y/mu
-                s_less = s.le(-self.lambd*mu).int()
-                s_more = s.ge(self.lambd*mu).int()
-                s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
-                k2 = k-s-y/mu
-                l = (k2 @ k2.transpose(-2, -1)) * self.scale
-                l = l.softmax(dim=-1)
-                l = l @ v
-                y = y+mu*(k-l-s)
-            
-            s = k-l+y/mu
-            s_less = s.le(-self.lambd*mu).int()
-            s_more = s.ge(self.lambd*mu).int()
-            s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
-            k2 = k-s-y/mu
-            l = (k2 @ k2.transpose(-2, -1)) * self.scale
-            l = l.softmax(dim=-1)
-            l = self.attn_drop(l)
-            x = l @ v
-            y = y+mu*(k-x-s)
-        
-        elif self.robust and self.layerth==self.layer:
-            l = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-            y = torch.zeros((B,self.num_heads,N,C // self.num_heads)).to(torch.device("cuda"), non_blocking=True)
-
-            mu=N*C/4/k.norm(p=1,dim=[-1,-2],keepdim=True)
-
-            for i in range(0,self.n-1):
-                s = k-l+y/mu
-                s_less = s.le(-self.lambd*mu).int()
-                s_more = s.ge(self.lambd*mu).int()
-                s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
-                k2 = k-s-y/mu
-                l = (k2 @ k2.transpose(-2, -1)) * self.scale
-                l = l.softmax(dim=-1)
-                l = l @ v
-                y = y+mu*(k-l-s)
-            
-            s = k-l+y/mu
-            s_less = s.le(-self.lambd*mu).int()
-            s_more = s.ge(self.lambd*mu).int()
-            s = (s-self.lambd*mu)*s_more + (s+self.lambd*mu)*s_less
-            k2 = k-s-y/mu
-            l = (k2 @ k2.transpose(-2, -1)) * self.scale
-            l = l.softmax(dim=-1)
-            l = self.attn_drop(l)
-            x = l @ v
-            y = y+mu*(k-x-s)
-
-        else:
-            attn = (k @ k.transpose(-2, -1)) * self.scale
+            attn = (q @ k.transpose(-2, -1)) * self.scale
             attn = attn.softmax(dim=-1)
-        
-            attn = self.attn_drop(attn)
-
-            # @ is a matrix multiplication
+            attn = self.attn_drop(attn) 
             x = (attn @ v)
 
-        # @ is a matrix multiplication
+        else:
+            # B, heads, N, features
+            B_U = self.B(x).reshape(B, N, self.num_heads, 4 * C // self.num_heads).permute(0, 2, 1, 3)
+            X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
+            
+            for _ in range(self.fixed_point_iter):
+                k, q, v, prev_x = torch.chunk(torch.einsum("bhni,hij->bhnj", X, self.A) + B_U, 4, dim=-1)
+
+                attn = q @ k.transpose(-2, -1) * self.scale
+                attn = attn.softmax(dim=-1)
+                # attn = self.attn_drop(attn)
+                # B, heads, N, features
+                x = prev_x + attn @ v
+
+                X = torch.cat((k, q, v, x), dim=-1)
+            
+
         x = x.transpose(1, 2).reshape(B,N,C)
        
         x = self.proj(x)
         x = self.proj_drop(x)
         
-        ################ COSINE SIMILARITY MEASURE
-        # n = x.shape[1] #x is in shape of (batchsize, length, dim)
-        # sqaure norm across features
-        # x_norm = torch.norm(x, 2, dim = -1, keepdim= True)
-        # x_ = x/x_norm
-        # x_cossim = torch.tril((x_ @ x_.transpose(-2, -1)), diagonal= -1).sum(dim = (-1, -2))/(n*(n - 1)/2)
-        # x_cossim = x_cossim.mean()
-        # python debugger breakpoint
-#         import pdb;pdb.set_trace()
-        ################
-       
         return x
 
 
 class Block(nn.Module):
  
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth=None, 
-                 robust=False, n=1, lambd=0, layer=0):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth = None,ttl_tokens=0,s_scalar=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias,
-                                    attn_drop=attn_drop, proj_drop=drop, robust=robust, 
-                                    layerth=layerth, n=n, lambd=lambd, layer=layer)
+                                    attn_drop=attn_drop, proj_drop=drop,layerth=layerth,ttl_tokens=ttl_tokens,s_scalar=s_scalar)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -150,6 +114,7 @@ class Block(nn.Module):
         self.layerth = layerth
  
     def forward(self, x):
+
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -191,16 +156,12 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_tokens = 2 if distilled else 1
-        self.lambd = lambd
-        self.n = n
-        self.layer = layer
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
        
         self.patch_embed = embed_layer(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
-        # print(img_size,patch_size,in_chans,num_patches)
  
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
@@ -211,8 +172,8 @@ class VisionTransformer(nn.Module):
         self.blocks = nn.Sequential(*[
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
-                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, 
-                layerth = i, robust=robust, n=self.n, lambd=self.lambd, layer=self.layer)
+                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
+                ttl_tokens=num_patches+self.num_tokens)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
  
@@ -278,7 +239,6 @@ class VisionTransformer(nn.Module):
             x = torch.cat((cls_token, x), dim=1)
         else:
             x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
-        # add the same pos_emb token to each sample? broadcasting...
         x = self.pos_drop(x + self.pos_embed)
         x = self.blocks(x)
         x = self.norm(x)

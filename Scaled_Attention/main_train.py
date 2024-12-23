@@ -147,7 +147,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
-    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
+    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR10', 'CIFAR100', 'IMNET', 'INAT', 'INAT19'],
                         type=str, help='Image Net dataset path')
     parser.add_argument('--inat-category', default='name',
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
@@ -470,13 +470,13 @@ if __name__ == '__main__':
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     if args.wandb:
         os.environ["WANDB_API_KEY"]=args.API_Key
-    try:
-        main(args)
-    except Exception as Argument:
-        print("error")
-     # creating/opening a file
-        f = open("error.txt", "a")
-        # writing in the file
-        f.write(str(Argument))
-        # closing the file
-        f.close() 
+    # try:
+    main(args)
+    # except Exception as Argument:
+    #     print("error")
+    #  # creating/opening a file
+    #     f = open("error.txt", "a")
+    #     # writing in the file
+    #     f.write(str(Argument))
+    #     # closing the file
+    #     f.close() 

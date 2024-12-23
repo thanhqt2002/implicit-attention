@@ -28,6 +28,9 @@ CUDA_VISIBLE_DEVICES='0,1,2,3' python -m torch.distributed.launch --master_port 
 Scaled Attention *S*
 ```
 CUDA_VISIBLE_DEVICES='1,2,3,0' python -m torch.distributed.launch --master_port 1 --nproc_per_node=4 --use_env main_train.py --model deit_tiny_patch16_224 --batch-size 256 --data-path /path/to/imagenet/ --output_dir /path/to/output/directory/
+
+CUDA_VISIBLE_DEVICES=1,2,3,4 python -m torch.distributed.launch --master_port 1 --nproc_per_node=4 --use_env main_train.py --model deit_tiny_patch16_224 --batch-size 256 --data-set CIFAR10 --data-path ../data/cifar10 --output_dir ../output/cifar10/
+
 ```
 
 Scaled Attention $\alpha$ $\times$ Asym \
@@ -45,4 +48,8 @@ CUDA_VISIBLE_DEVICES='0,1,2,3' python -m torch.distributed.launch --master_port 
 Run with --attack 'fgm' for FGSM attack and adjust --eps for severity of perturbation. 
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --master_port=$port_num --use_env main.py --model deit_tiny_patch16_224 --batch-size 48 --data-path /path/to/data/imagenet --output_dir /path/to/output/directory/ --project_name 'project_name' --job_name job_name --attack 'pgd' --eps 0.1 --finetune /path/to/trained/model/ --eval 1 --robust --num_iter 2 --layer -1 --lambd 4
+
+CUDA_VISIBLE_DEVICES=1,2,3,4 python -m torch.distributed.launch --nproc_per_node=4 --master_port=1 --use_env main.py --model deit_tiny_patch16_224 --batch-size 48 --data-path ../data/cifar10 --output_dir ../output/test/cifar10 --attack 'pgd' --eps 0.1 --finetune ../output/cifar10/21_12_2024_14:38:45_deit_tiny_patch16_224_checkpoint.pth --eval 1 --robust --num_iter 2 --layer -1 --lambd 4
+
+
 ```

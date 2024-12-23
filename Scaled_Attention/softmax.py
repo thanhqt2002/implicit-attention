@@ -27,41 +27,55 @@ class Attention(nn.Module):
         self.layerth = layerth
         self.s_scalar = s_scalar
         head_dim = dim // num_heads
+        self.head_dim = head_dim
         # sqrt (D)
         self.scale = head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        if self.s_scalar:
-            self.s = nn.Parameter(torch.zeros(1))
+        if self.layerth != 0:
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         else:
-            self.s = nn.Parameter(torch.zeros(self.num_heads, self.ttl_tokens, self.ttl_tokens))
-        
+            self.A = nn.Parameter(torch.zeros(head_dim * 4, head_dim * 4))  # Matrix Multp
+            self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
+            nn.init.xavier_uniform_(self.A)
+            self.fixed_point_iter = 5
+
         self.attn_drop = nn.Dropout(attn_drop)
 
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        
+
     def forward(self, x):
         B, N, C = x.shape
-        # q,k -> B -> heads -> n -> features
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
+        if self.layerth != 0:
+            # q,k -> B -> heads -> n -> features
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-        attn = self.attn_drop(attn) 
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn) 
+            x = (attn @ v)
 
-        I = torch.eye(N,N).unsqueeze(dim=0).unsqueeze(dim=0).expand(B,self.num_heads,N,N).to(torch.device("cuda"), non_blocking=True)
-        if self.s_scalar:
-            sym_attn = (k @ k.transpose(-2, -1)) * self.scale
-            sym_attn = sym_attn.softmax(dim=-1)
-            v = (I-sym_attn * self.s) @ v
         else:
-            s = self.s.unsqueeze(dim=0).expand(B,self.num_heads,N,N)
-            v = (I-s) @ v
+            # B, heads, N, features
+            B_U = self.B(x).reshape(B, N, self.num_heads, 4 * C // self.num_heads).permute(0, 2, 1, 3)
+            X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
             
-        x = (attn @ v)
+            for _ in range(self.fixed_point_iter):
+                k, q, v, prev_x = torch.chunk(torch.einsum("bhni,ij->bhnj", X, self.A) + B_U, 4, dim=-1)
+
+                attn = q @ k.transpose(-2, -1) * self.scale
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn)
+                # B, heads, N, features
+                x = prev_x + attn @ v
+
+                X = torch.cat((k, q, v, x), dim=-1)
+            
+    
         x = x.transpose(1, 2).reshape(B,N,C)
        
         x = self.proj(x)
