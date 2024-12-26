@@ -34,7 +34,7 @@ class Attention(nn.Module):
         if self.layerth != 0:
             self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         else:
-            self.A = nn.Parameter(torch.zeros(head_dim * 4, head_dim * 4))  # Matrix Multp
+            self.A = nn.Parameter(torch.zeros(num_heads, head_dim * 4, head_dim * 4))  # Matrix Multp
             self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
             nn.init.xavier_uniform_(self.A)
             self.fixed_point_iter = 5
@@ -65,7 +65,7 @@ class Attention(nn.Module):
             X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
             
             for _ in range(self.fixed_point_iter):
-                k, q, v, prev_x = torch.chunk(torch.einsum("bhni,ij->bhnj", X, self.A) + B_U, 4, dim=-1)
+                k, q, v, prev_x = torch.chunk(torch.einsum("bhni,hij->bhnj", X, self.A) + B_U, 4, dim=-1)
 
                 attn = q @ k.transpose(-2, -1) * self.scale
                 attn = attn.softmax(dim=-1)
