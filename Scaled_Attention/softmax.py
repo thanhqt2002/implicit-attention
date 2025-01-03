@@ -19,7 +19,7 @@ import copy
 
  
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., layerth=0, ttl_tokens=0,s_scalar=False):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., layerth=0, ttl_tokens=0,s_scalar=False, is_baseline=False):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
@@ -30,14 +30,18 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         # sqrt (D)
         self.scale = head_dim ** -0.5
+        self.is_baseline = is_baseline
 
-        if self.layerth != 0:
-            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        if not self.is_baseline:
+            if self.layerth != 0:
+                self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+            else:
+                self.A = nn.Parameter(torch.zeros(num_heads, head_dim * 4, head_dim * 4))  # Matrix Multp
+                self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
+                nn.init.xavier_uniform_(self.A)
+                self.fixed_point_iter = 5
         else:
-            self.A = nn.Parameter(torch.zeros(num_heads, head_dim * 4, head_dim * 4))  # Matrix Multp
-            self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
-            nn.init.xavier_uniform_(self.A)
-            self.fixed_point_iter = 5
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
 
         self.attn_drop = nn.Dropout(attn_drop)
 
@@ -49,8 +53,33 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
 
-        if self.layerth != 0:
-            # q,k -> B -> heads -> n -> features
+        if not self.is_baseline:
+            if self.layerth != 0:
+                # q,k -> B -> heads -> n -> features
+                qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+                q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
+
+                attn = (q @ k.transpose(-2, -1)) * self.scale
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn) 
+                x = (attn @ v)
+
+            else:
+                # B, heads, N, features
+                B_U = self.B(x).reshape(B, N, self.num_heads, 4 * C // self.num_heads).permute(0, 2, 1, 3)
+                X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
+                
+                for _ in range(self.fixed_point_iter):
+                    k, q, v, prev_x = torch.chunk(torch.einsum("bhni,hij->bhnj", X, self.A) + B_U, 4, dim=-1)
+
+                    attn = q @ k.transpose(-2, -1) * self.scale
+                    attn = attn.softmax(dim=-1)
+                    attn = self.attn_drop(attn)
+                    # B, heads, N, features
+                    x = prev_x + attn @ v
+
+                    X = torch.cat((k, q, v, x), dim=-1)
+        else:
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
@@ -58,22 +87,6 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn) 
             x = (attn @ v)
-
-        else:
-            # B, heads, N, features
-            B_U = self.B(x).reshape(B, N, self.num_heads, 4 * C // self.num_heads).permute(0, 2, 1, 3)
-            X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
-            
-            for _ in range(self.fixed_point_iter):
-                k, q, v, prev_x = torch.chunk(torch.einsum("bhni,hij->bhnj", X, self.A) + B_U, 4, dim=-1)
-
-                attn = q @ k.transpose(-2, -1) * self.scale
-                attn = attn.softmax(dim=-1)
-                attn = self.attn_drop(attn)
-                # B, heads, N, features
-                x = prev_x + attn @ v
-
-                X = torch.cat((k, q, v, x), dim=-1)
             
     
         x = x.transpose(1, 2).reshape(B,N,C)
@@ -87,11 +100,11 @@ class Attention(nn.Module):
 class Block(nn.Module):
  
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth = None,ttl_tokens=0,s_scalar=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth = None,ttl_tokens=0,s_scalar=False, is_baseline=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias,
-                                    attn_drop=attn_drop, proj_drop=drop,layerth=layerth,ttl_tokens=ttl_tokens,s_scalar=s_scalar)
+                                    attn_drop=attn_drop, proj_drop=drop,layerth=layerth,ttl_tokens=ttl_tokens,s_scalar=s_scalar, is_baseline=is_baseline)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -117,7 +130,7 @@ class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None, distilled=False,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
-                 act_layer=None, weight_init='',pretrained_cfg=None,pretrained_cfg_overlay=None,s_scalar=False):
+                 act_layer=None, weight_init='',pretrained_cfg=None,pretrained_cfg_overlay=None,s_scalar=False, is_baseline=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -160,7 +173,7 @@ class VisionTransformer(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
-                ttl_tokens=num_patches+self.num_tokens,s_scalar=self.s_scalar)
+                ttl_tokens=num_patches+self.num_tokens,s_scalar=self.s_scalar, is_baseline=is_baseline)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
  

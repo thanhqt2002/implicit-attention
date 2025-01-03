@@ -38,6 +38,8 @@ def get_args_parser():
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--pi_reg', type= bool, default= False)
     parser.add_argument('--pi_reg_coef', type=float, default= 0.1)
+    parser.add_argument('--is-baseline', type= "store_true", default=False)
+    parser.add_argument('--wandb-key', default='', type=str, help='API key for wandb')
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
@@ -275,6 +277,7 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         s_scalar=args.s_scalar,
+        is_baseline=args.is_baseline
     )
 
     if args.finetune:
