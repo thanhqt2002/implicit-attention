@@ -25,7 +25,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True,wandb=False):
+                    set_training_mode=True,use_wandb=False,rank=0):
     # put our model in training mode... so that drop out and batch normalisation does not affect it
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -82,14 +82,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    if wandb:
+    if use_wandb and rank==0:
         for k, meter in metric_logger.meters.items():
             wandb.log({k: meter.global_avg, 'epoch': epoch})
    
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0, wandb=False):
+def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0):
     criterion = torch.nn.CrossEntropyLoss()
 
 
@@ -131,10 +131,7 @@ def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
-    if wandb:
-        for k, meter in metric_logger.meters.items():
-            wandb.log({f'test_{k}': meter.global_avg , 'epoch':epoch})
-
+    
     if attn_only:
         return r, (attn, pi)
     return r

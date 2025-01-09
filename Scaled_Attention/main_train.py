@@ -38,6 +38,7 @@ def get_args_parser():
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--pi_reg', type= bool, default= False)
     parser.add_argument('--pi_reg_coef', type=float, default= 0.1)
+    parser.add_argument('--attention_type', type=str, default="implicit")
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
@@ -275,6 +276,7 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         s_scalar=args.s_scalar,
+        attention_type=args.attention_type
     )
 
     if args.finetune:
@@ -394,17 +396,17 @@ def main(args):
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
 
-    if args.wandb:
+    if args.wandb and global_rank == 0:
         wandb.init(
         # set the wandb project where this run will be logged
-        project="project_name",
+        project="implicit-attention",
         
         # track hyperparameters and run metadata
         config=args)
-        wandb.run.name = "run_name"
+        wandb.run.name = f"{args.attention_type}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}"
 
-    if args.eval:
-        test_stats = evaluate(data_loader_val, model, device, wandb=args.wandb)
+    if args.eval and global_rank == 0:
+        test_stats = evaluate(data_loader_val, model, device, wandb=args.wandb, rank=global_rank)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
@@ -425,7 +427,8 @@ def main(args):
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune == '', # keep in eval mode during finetuning
-            wandb=args.wandb,
+            use_wandb=args.wandb,
+            rank=global_rank,
         )
 
         lr_scheduler.step(epoch)
@@ -443,7 +446,7 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        test_stats = evaluate(data_loader_val, model, device, epoch=epoch, wandb=args.wandb)
+        test_stats = evaluate(data_loader_val, model, device, epoch=epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')
@@ -453,6 +456,9 @@ def main(args):
                      'epoch': epoch,
                      'n_parameters': n_parameters,
                      'max_accuracy': max_accuracy}
+        
+        if args.wandb and global_rank == 0:
+            wandb.log(log_stats)
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / f"{current_time}_{args.model}_log.txt").open("a") as f:
