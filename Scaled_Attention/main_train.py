@@ -156,6 +156,7 @@ def get_args_parser():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
+    parser.add_argument('--save_content_every', type=int, default=5)
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -403,7 +404,7 @@ def main(args):
         
         # track hyperparameters and run metadata
         config=args)
-        wandb.run.name = f"{args.attention_type}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}"
+        wandb.run.name = f"{args.attention_type}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}--{args.seed}"
 
     if args.eval and global_rank == 0:
         test_stats = evaluate(data_loader_val, model, device, wandb=args.wandb, rank=global_rank)
@@ -433,7 +434,7 @@ def main(args):
 
         lr_scheduler.step(epoch)
 
-        if args.output_dir:
+        if args.output_dir and epoch % args.save_content_every == 0:
             checkpoint_paths = [output_dir / f'{current_time}_{args.model}_checkpoint.pth']
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
