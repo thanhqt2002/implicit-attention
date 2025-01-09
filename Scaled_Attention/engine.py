@@ -89,7 +89,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0, use_wandb=False, rank=-1):
+def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0):
     criterion = torch.nn.CrossEntropyLoss()
 
 
@@ -131,10 +131,7 @@ def evaluate(data_loader, model, device, attn_only=False, batch_limit=0, epoch=0
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
-    if use_wandb and rank==0:
-        for k, meter in metric_logger.meters.items():
-            wandb.log({f'test_{k}': meter.global_avg , 'epoch':epoch})
-
+    
     if attn_only:
         return r, (attn, pi)
     return r

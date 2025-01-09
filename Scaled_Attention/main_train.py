@@ -38,7 +38,7 @@ def get_args_parser():
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--pi_reg', type= bool, default= False)
     parser.add_argument('--pi_reg_coef', type=float, default= 0.1)
-    parser.add_argument('--is_baseline', action= "store_true", default=False)
+    parser.add_argument('--attention_type', type=str, default="implicit")
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
@@ -277,7 +277,7 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         s_scalar=args.s_scalar,
-        is_baseline=args.is_baseline
+        attention_type=args.attention_type
     )
 
     if args.finetune:
@@ -406,7 +406,7 @@ def main(args):
         config=args)
         wandb.run.name = f"{args.model}-{args.batch_size}-{args.lr}--{args.data_set}-{args.is_baseline}-{args.seed}"
 
-    if args.eval and args.gpu == 0:
+    if args.eval and global_rank == 0:
         test_stats = evaluate(data_loader_val, model, device, wandb=args.wandb, rank=global_rank)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
@@ -447,7 +447,7 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        test_stats = evaluate(data_loader_val, model, device, epoch=epoch, use_wandb=args.wandb, rank=global_rank)
+        test_stats = evaluate(data_loader_val, model, device, epoch=epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')
