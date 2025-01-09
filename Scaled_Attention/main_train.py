@@ -435,7 +435,7 @@ def main(args):
         lr_scheduler.step(epoch)
 
         if args.output_dir and epoch % args.save_content_every == 0:
-            checkpoint_paths = [output_dir / f'{current_time}_{args.model}_checkpoint.pth']
+            checkpoint_paths = [output_dir / f'{current_time}_{args.model}_{args.epoch}_checkpoint.pth']
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
