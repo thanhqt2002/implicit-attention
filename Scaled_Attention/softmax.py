@@ -92,12 +92,13 @@ class Attention(nn.Module):
             # Reference: https://github.com/thanhqt2002/sim/blob/d267f3dd76f493292647d4b9bd8edd199c8f9340/train.py#L83
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
-            
+
             k_norm = torch.cdist(q, k, p=2) ** 2
             attn = torch.exp(-k_norm)
             # attn = attn.masked_fill(self.tril[:N, :N] == 0, 0)  # TODO: we don't need mask fill here?
             denom = 0.25 + attn.sum(dim=-1, keepdim=True)
             attn = attn / denom
+            attn = self.attn_drop(attn)
             w_map = v / torch.sqrt(v ** 2 + 1)
             x = attn @ w_map
         else:
