@@ -38,7 +38,7 @@ def get_args_parser():
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--pi_reg', type= bool, default= False)
     parser.add_argument('--pi_reg_coef', type=float, default= 0.1)
-    parser.add_argument('--attention_type', type=str, default="implicit")
+    parser.add_argument('--attention_type', type=str, choices=["implicit", "softmax", "lipschitz"], default="implicit")
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
