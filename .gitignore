@@ -39,6 +39,6 @@ Thumbs.db
 */__pycache__/
 wandb/
 data/
-output/
+outputs/
 
 .env

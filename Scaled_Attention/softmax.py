@@ -40,7 +40,7 @@ class Attention(nn.Module):
                 self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
                 nn.init.xavier_uniform_(self.A)
                 self.fixed_point_iter = 5
-        elif self.attention_type == "explicit":
+        elif self.attention_type == "softmax" or self.attention_type == "lipschitz":
             self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         else:
             raise NotImplemented
@@ -80,7 +80,7 @@ class Attention(nn.Module):
                     x = prev_x + attn @ v
 
                     X = torch.cat((k, q, v, x), dim=-1)
-        elif self.attention_type == "explicit":
+        elif self.attention_type == "softmax":
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
@@ -88,6 +88,19 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn) 
             x = (attn @ v)
+        elif self.attention_type == "lipschitz":
+            # Reference: https://github.com/thanhqt2002/sim/blob/d267f3dd76f493292647d4b9bd8edd199c8f9340/train.py#L83
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
+
+            k_norm = torch.cdist(q, k, p=2) ** 2
+            attn = torch.exp(-k_norm)
+            # attn = attn.masked_fill(self.tril[:N, :N] == 0, 0)  # TODO: we don't need mask fill here?
+            denom = 0.25 + attn.sum(dim=-1, keepdim=True)
+            attn = attn / denom
+            attn = self.attn_drop(attn)
+            w_map = v / torch.sqrt(v ** 2 + 1)
+            x = attn @ w_map
         else:
             raise NotImplemented
             
