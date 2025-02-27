@@ -39,6 +39,7 @@ def get_args_parser():
     parser.add_argument('--pi_reg', type= bool, default= False)
     parser.add_argument('--pi_reg_coef', type=float, default= 0.1)
     parser.add_argument('--attention_type', type=str, choices=["implicit", "softmax", "lipschitz"], default="implicit")
+    parser.add_argument('--num_implicit_layers', type=int, default=1, choices=[-1, 1, 5, 8]) # -1 means all layers
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
@@ -269,6 +270,7 @@ def main(args):
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     print(f"Creating model: {args.model}")
+    num_implicit_layers = args.num_implicit_layers if args.attention_type == "implicit" else 0
     model = create_model(
         args.model,
         pretrained=False,
@@ -277,7 +279,8 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         s_scalar=args.s_scalar,
-        attention_type=args.attention_type
+        attention_type=args.attention_type,
+        num_implicit_layers=num_implicit_layers,
     )
 
     if args.finetune:
@@ -404,7 +407,7 @@ def main(args):
         
         # track hyperparameters and run metadata
         config=args)
-        wandb.run.name = f"{args.attention_type}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}--{args.seed}"
+        wandb.run.name = f"{args.attention_type}-{args.num_implicit_layers}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}--{args.seed}"
 
     if args.eval and global_rank == 0:
         test_stats = evaluate(data_loader_val, model, device, wandb=args.wandb, rank=global_rank)
@@ -435,7 +438,7 @@ def main(args):
         lr_scheduler.step(epoch)
 
         if args.output_dir and epoch % args.save_content_every == 0:
-            checkpoint_paths = [output_dir / f'{current_time}_{args.model}_checkpoint.pth']
+            checkpoint_paths = [output_dir / f'{args.attention_type}-{args.num_implicit_layers}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}--{args.seed}_checkpoint.pth']
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
@@ -462,7 +465,7 @@ def main(args):
             wandb.log(log_stats)
 
         if args.output_dir and utils.is_main_process():
-            with (output_dir / f"{current_time}_{args.model}_log.txt").open("a") as f:
+            with (output_dir / f"{args.attention_type}-{args.num_implicit_layers}-{args.model}-{args.batch_size}-{args.lr}--{args.data_set}--{args.seed}_log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
