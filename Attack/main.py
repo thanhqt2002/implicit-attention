@@ -201,17 +201,7 @@ from datetime import datetime
 now = datetime.now()
 current_time = now.strftime("%d_%m_%Y_%H:%M:%S")
 
-def main(args):
-    if args.use_wandb:
-        import wandb
-        use_wandb = True
-        wandb.init(project=args.project_name)
-        wandb.run.name = f"{os.uname()[1]}//{args.job_name}"
-        wandb.config.update(args)
-    else:
-        use_wandb = False
-        
-    
+def main(args):    
     utils.init_distributed_mode(args)
 
     print(args)
@@ -229,28 +219,26 @@ def main(args):
 
     cudnn.benchmark = True
 
-    if not args.eval:
-        dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    args.nb_classes = 10
+    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
-        if not args.eval:
-            if args.repeated_aug:
-                sampler_train = RASampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-                )
-            else:
-                sampler_train = torch.utils.data.DistributedSampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-                )
+        if args.repeated_aug:
+            sampler_train = RASampler(
+                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+        else:
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+        # may need to alter eval set with different # GPUs
         if args.dist_eval:
             if len(dataset_val) % num_tasks != 0:
                 print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                       'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                      'equal num of samples per-process.')
+                      'equal num of samples per-process.')    
             sampler_val = torch.utils.data.DistributedSampler(
                 dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
         else:
@@ -258,15 +246,24 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+
+    if args.use_wandb and global_rank == 0:
+        import wandb
+        use_wandb = True
+        wandb.init(project=args.project_name)
+        wandb.run.name = f"{os.uname()[1]}//{args.job_name}"
+        wandb.config.update(args)
+    else:
+        use_wandb = False
     
-    if not args.eval:
-        data_loader_train = torch.utils.data.DataLoader(
-            dataset_train, sampler=sampler_train,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=True,
-        )
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset_train, sampler=sampler_train,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
 
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
@@ -285,6 +282,19 @@ def main(args):
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     print(f"Creating model: {args.model}")
+    # model = create_model(
+    #     args.model,
+    #     pretrained=False,
+    #     num_classes=args.nb_classes,
+    #     drop_rate=args.drop,
+    #     drop_path_rate=args.drop_path,
+    #     drop_block_rate=None,
+    #     robust=args.robust,
+    #     n=args.num_iter,
+    #     lambd=args.lambd,
+    #     layer=args.layer,
+    # )
+
     model = create_model(
         args.model,
         pretrained=False,
@@ -292,10 +302,9 @@ def main(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
-        robust=args.robust,
-        n=args.num_iter,
-        lambd=args.lambd,
-        layer=args.layer,
+        # s_scalar=args.s_scalar,
+        attention_type="implicit",
+        num_implicit_layers=1,
     )
 
     if args.finetune:
@@ -412,7 +421,7 @@ def main(args):
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
 
-    if args.eval:
+    if args.eval and global_rank == 0:
         test_stats = evaluate(data_loader_val, model, device, attack=args.attack, eps=args.eps)
         
         if args.inc_path:
@@ -478,7 +487,7 @@ def main(args):
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune == ''  # keep in eval mode during finetuning
         )
-        if use_wandb:
+        if use_wandb and global_rank == 0:
             wandb.log({'loss_train':train_stats['loss']})
 
         lr_scheduler.step(epoch)
@@ -496,7 +505,7 @@ def main(args):
                 }, checkpoint_path)
 
         test_stats = evaluate(data_loader_val, model, device)
-        if use_wandb:
+        if use_wandb and global_rank == 0:
             wandb.log({'val_acc1':test_stats['acc1'], 'val_acc5':test_stats['acc5'], 'val_loss':test_stats['loss']})
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
@@ -515,7 +524,7 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
-    if use_wandb:
+    if use_wandb and global_rank == 0:
         wandb.log({'test_acc':max_accuracy})
         wandb.finish()
 

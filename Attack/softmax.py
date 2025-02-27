@@ -19,31 +19,28 @@ import copy
 
  
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., layerth=0, ttl_tokens=0,s_scalar=False):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., layerth=0, ttl_tokens=0,s_scalar=False, attention_type="implicit"):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
         self.ttl_tokens = ttl_tokens
-        self.layerth = layerth
+        # self.layerth = layerth
         self.s_scalar = s_scalar
         head_dim = dim // num_heads
         self.head_dim = head_dim
         # sqrt (D)
         self.scale = head_dim ** -0.5
+        self.attention_type = attention_type
 
-        if self.layerth != 0 or True:
-            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        else:
+        if self.attention_type == "implicit":
             self.A = nn.Parameter(torch.zeros(num_heads, head_dim * 4, head_dim * 4))  # Matrix Multp
             self.B = nn.Linear(dim, dim * 4, bias=qkv_bias)
             nn.init.xavier_uniform_(self.A)
             self.fixed_point_iter = 5
-
-        # if self.s_scalar:
-        #     self.s = nn.Parameter(torch.zeros(1))
-        # else:
-        #     self.s = nn.Parameter(torch.zeros(self.num_heads, self.ttl_tokens, self.ttl_tokens))
-        
+        elif self.attention_type == "softmax" or self.attention_type == "lipschitz":
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        else:
+            raise NotImplemented
         self.attn_drop = nn.Dropout(attn_drop)
 
         self.proj = nn.Linear(dim, dim)
@@ -54,26 +51,7 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
 
-        # I = torch.eye(N,N).unsqueeze(dim=0).unsqueeze(dim=0).expand(B,self.num_heads,N,N).to(torch.device("cuda"), non_blocking=True)
-        # if self.s_scalar:
-        #     sym_attn = (k @ k.transpose(-2, -1)) * self.scale
-        #     sym_attn = sym_attn.softmax(dim=-1)
-        #     v = (I-sym_attn * self.s) @ v
-        # else:
-        #     s = self.s.unsqueeze(dim=0).expand(B,self.num_heads,N,N)
-        #     v = (I-s) @ v
-
-        if self.layerth != 0 or True:
-            # q,k -> B -> heads -> n -> features
-            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
-
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn) 
-            x = (attn @ v)
-
-        else:
+        if self.attention_type == "implicit":
             # B, heads, N, features
             B_U = self.B(x).reshape(B, N, self.num_heads, 4 * C // self.num_heads).permute(0, 2, 1, 3)
             X = torch.zeros((B, self.num_heads, N, 4 * C // self.num_heads), device=x.device, requires_grad=False)
@@ -83,13 +61,36 @@ class Attention(nn.Module):
 
                 attn = q @ k.transpose(-2, -1) * self.scale
                 attn = attn.softmax(dim=-1)
-                # attn = self.attn_drop(attn)
+                attn = self.attn_drop(attn)
                 # B, heads, N, features
                 x = prev_x + attn @ v
 
                 X = torch.cat((k, q, v, x), dim=-1)
-            
+        elif self.attention_type == "softmax":
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn) 
+            x = (attn @ v)
+        elif self.attention_type == "lipschitz":
+            # Reference: https://github.com/thanhqt2002/sim/blob/d267f3dd76f493292647d4b9bd8edd199c8f9340/train.py#L83
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
+
+            k_norm = torch.cdist(q, k, p=2) ** 2
+            attn = torch.exp(-k_norm)
+            # attn = attn.masked_fill(self.tril[:N, :N] == 0, 0)  # TODO: we don't need mask fill here?
+            denom = 1e-6 + attn.sum(dim=-1, keepdim=True)
+            attn = attn / denom / N
+            attn = self.attn_drop(attn)
+            w_map = v / torch.sqrt(v ** 2 + 1)
+            x = attn @ w_map
+        else:
+            raise NotImplemented
+            
+    
         x = x.transpose(1, 2).reshape(B,N,C)
        
         x = self.proj(x)
@@ -101,17 +102,17 @@ class Attention(nn.Module):
 class Block(nn.Module):
  
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth = None,ttl_tokens=0,s_scalar=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, layerth = None,ttl_tokens=0,s_scalar=False, attention_type="implicit"):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias,
-                                    attn_drop=attn_drop, proj_drop=drop,layerth=layerth,ttl_tokens=ttl_tokens,s_scalar=s_scalar)
+                                    attn_drop=attn_drop, proj_drop=drop,layerth=layerth,ttl_tokens=ttl_tokens,s_scalar=s_scalar, attention_type=attention_type)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.layerth = layerth
+        # self.layerth = layerth
  
     def forward(self, x):
 
@@ -131,7 +132,7 @@ class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None, distilled=False,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
-                 act_layer=None, weight_init='',pretrained_cfg=None,pretrained_cfg_overlay=None,robust=False,n=1,lambd=0,layer=0):
+                 act_layer=None, weight_init='',pretrained_cfg=None,pretrained_cfg_overlay=None,s_scalar=False, attention_type="implicit", num_implicit_layers=1):
         """
         Args:
             img_size (int, tuple): input image size
@@ -156,6 +157,7 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_tokens = 2 if distilled else 1
+        self.s_scalar = s_scalar
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
        
@@ -169,18 +171,37 @@ class VisionTransformer(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
  
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        self.blocks = nn.Sequential(*[
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
-                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
-                ttl_tokens=num_patches+self.num_tokens)
-            for i in range(depth)])
+        self.num_implicit_layers = num_implicit_layers
+         # replace the first num_implicit_layers with implicit attention
+        if self.num_implicit_layers > -1:
+            print(f"Using {self.num_implicit_layers} implicit layers")
+            self.blocks = nn.Sequential(*([
+                Block(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                    attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
+                    ttl_tokens=num_patches+self.num_tokens,s_scalar=self.s_scalar, attention_type="implicit")
+                for i in range(self.num_implicit_layers)]
+                +[
+                Block(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                    attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
+                    ttl_tokens=num_patches+self.num_tokens,s_scalar=self.s_scalar, attention_type="softmax")
+                for i in range(self.num_implicit_layers, depth)
+                ]))
+        else: # all layers are implicit
+            print(f"Using all {depth} implicit layers")
+            self.blocks = nn.Sequential(*[
+                Block(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                    attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, layerth = i, 
+                    ttl_tokens=num_patches+self.num_tokens,s_scalar=self.s_scalar, attention_type="implicit")
+                for i in range(depth)])
         self.norm = norm_layer(embed_dim)
  
         # Representation layer
         if representation_size and not distilled:
             self.num_features = representation_size
-            self.pre_logits = nn.Sequential(OrderedDict([
+            self.pre_logits = nn.Sequential(OrderedDict([f
                 ('fc', nn.Linear(embed_dim, representation_size)),
                 ('act', nn.Tanh())
             ]))
